@@ -1,17 +1,12 @@
 minja - minimalist JSON parser:
 -------------------------------
 
-minja is a minimalist JSON parser that is all contained within 2 files (1 .h, 1 .cpp). It has been designed to have no 
-other dependency than std::vector, the C runtimle library and built-in types.
+minja is a minimalist JSON parser that is all contained within 2 files (1 .h, 1 .cpp). It has been designed to have no other dependency than std::vector, the C runtimle library and built-in types.
 
 It is built in 3 layers:
-- A tokenizer/processor laker that parses the json text in place and emits tokens to a processor that can take specific
-actions depending on the token's type. This layer does 0 allocation.
-- A document builder that generates a tree of nodes representing the json data in a hierarchical structure. This layer
-allocates memory for the tree node and structure as well as for various bits of the json doc that have to be copied. Each 
-node alos exposes methods to manually construct a tree, making it easy to build documents from scratch. 
-- A visitor that can scan a json document and trigger callbacks for each element. This is useful for implementing seria-
-lizers and other structured data processors.
+- A tokenizer/processor laker that parses the json text in place and emits tokens to a processor that can take specific actions depending on the token's type. This layer does 0 allocation.
+- A document builder that generates a tree of nodes representing the json data in a hierarchical structure. This layer allocates memory for the tree node and structure as well as for various bits of the json doc that have to be copied. Each node also exposes methods to manually construct a tree, making it easy to build documents from scratch. 
+- A visitor that can scan a json document and trigger callbacks for each element. This is useful for implementing serializers and other structured data processors.
 
 
 Usage:
@@ -24,5 +19,5 @@ Also, main.cpp contains a suite of unit tests as well as sample code on how to u
 History:
 --------
 
-0.1 - 21/12/2012
-  * Initial commit
+* 0.1 - 21/12/2012
+- Initial commit
