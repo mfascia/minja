@@ -1,23 +1,31 @@
 minja - minimalist JSON parser:
 -------------------------------
 
-minja is a minimalist JSON parser that is all contained within 2 files (1 .h, 1 .cpp). It has been designed to have no other dependency than std::vector, the C runtimle library and built-in types.
+minja is a minimalist JSON parser that is all contained within 2 files (1 .h, 1 .cpp). It has been designed to have no other dependency than std::vector, the C runtime library and built-in types. It targets memory constrained platforms, main.cpp builds and runs as-is on Windows, Linux and macOS.
 
 It is built in 3 layers:
-- A tokenizer/processor laker that parses the json text in place and emits tokens to a processor that can take specific actions depending on the token's type. This layer does 0 allocation.
-- A document builder that generates a tree of nodes representing the json data in a hierarchical structure. This layer allocates memory for the tree node and structure as well as for various bits of the json doc that have to be copied. Each node also exposes methods to manually construct a tree, making it easy to build documents from scratch. 
+- A tokenizer/processor layer that parses the json text in place and emits tokens to a processor that can take specific actions depending on the token's type. This layer does 0 allocation.
+- A document builder that generates a tree of nodes representing the json data in a hierarchical structure. This layer allocates memory for the tree node and structure as well as for various bits of the json doc that have to be copied. Each node also exposes methods to manually construct a tree, making it easy to build documents from scratch.
 - A visitor that can scan a json document and trigger callbacks for each element. This is useful for implementing serializers and other structured data processors.
 
 
 Usage:
 ------
 
-Simply add minja.h and minja.cpp into your projects and include minja.h ina ny compilation unit requiring the parser.
+Simply add minja.h and minja.cpp into your projects and include minja.h in any compilation unit requiring the parser.
 Also, main.cpp contains a suite of unit tests as well as sample code on how to use the parser's API
+
+JSON numbers are stored as JsonNumber, which is double by default. Define MINJA_USE_FLOAT before including minja.h to use float instead, at the cost of precision.
 
 
 History:
 --------
+
+* 0.2 - 26/09/2026
+- Fixed a number of correctness and memory-safety bugs found during a code review (bad Visit() dispatch, unescaped strings, leaked node names/strings, stack buffer overflows, unbounded recursion, non-copyable JsonNode/JsonDocument)
+- JSON numbers now configurable as float or double via JsonNumber/MINJA_USE_FLOAT (was hardcoded float)
+- main.cpp no longer depends on MSVC-only conio.h/void main()/getch()
+- Expanded main.cpp test coverage across all node types
 
 * 0.1 - 21/12/2012
 - Initial commit

@@ -198,9 +198,31 @@ namespace JsonTokenizer
 		}
 	}
 
+	// bumps _Ctx.m_NestingDepth on construction and puts it back on destruction, regardless of
+	// which of ReadArray/ReadObject's several return points is taken
+	class DepthGuard
+	{
+	public:
+		DepthGuard( TokenProcessor & _Ctx ) : m_Ctx(_Ctx) { ++m_Ctx.m_NestingDepth; }
+		~DepthGuard() { --m_Ctx.m_NestingDepth; }
+
+	private:
+		TokenProcessor & m_Ctx;
+	};
+
 	ParseResult ReadArray( TokenProcessor & _Ctx,  const char * _pCurr, const char ** _ppEnd )
 	{
 		const char * pStart = _pCurr;
+
+		// guard against arrays/objects nested so deeply that the mutual recursion below
+		// blows the native stack (a malicious or just malformed input could do this)
+		DepthGuard depthGuard( _Ctx );
+		if( _Ctx.m_NestingDepth > TokenProcessor::MaxNestingDepth )
+		{
+			*_ppEnd = _pCurr;
+			_Ctx.OnError(pStart, *_ppEnd, "Arrays/objects nested too deeply");
+			return ParseError;
+		}
 
 		_Ctx.OnBeginArray( _pCurr );
 
@@ -282,7 +304,6 @@ namespace JsonTokenizer
 		const char * pStart = _pCurr;
 
 		const char * pItemEnd;
-		const char * pKeyStart = _pCurr;
 
 		ParseResult result = ParseNoMatch;
 
@@ -325,6 +346,15 @@ namespace JsonTokenizer
 	ParseResult ReadObject( TokenProcessor & _Ctx,  const char * _pCurr, const char ** _ppEnd )
 	{
 		const char * pStart = _pCurr;
+
+		// see ReadArray - same nesting-depth guard, objects and arrays recurse into each other
+		DepthGuard depthGuard( _Ctx );
+		if( _Ctx.m_NestingDepth > TokenProcessor::MaxNestingDepth )
+		{
+			*_ppEnd = _pCurr;
+			_Ctx.OnError(pStart, *_ppEnd, "Arrays/objects nested too deeply");
+			return ParseError;
+		}
 
 		_Ctx.OnBeginObject( _pCurr );
 
@@ -395,7 +425,7 @@ class JsonDummyNode : public JsonNode
 public:
 	virtual bool IsValid() const										{ return false; }
 	virtual bool GetBool() const										{ return false; }
-	virtual float GetNumber() const										{ return 0.0f; }
+	virtual JsonNumber GetNumber() const								{ return 0.0; }
 	virtual const char * GetString() const								{ return "! invalid Json node"; }
 	virtual bool IsLastChild() const									{ return true; }	
 	virtual const JsonNode & operator [] ( size_t _Index ) const		{ return * this; }
@@ -419,6 +449,15 @@ JsonNode::JsonNode()
 
 JsonNode::~JsonNode()
 {
+	// the name and, for string nodes, the value were both duplicated with new[] in
+	// CreateNode/AddString - free them here, they used to leak on every node
+	delete [] m_pName;
+
+	if( m_Type == JsonNodeType_String && m_Value.String != NULL )
+	{
+		delete [] m_Value.String;
+	}
+
 	if( m_Type == JsonNodeType_Object && m_Value.Children != NULL )
 	{
 		for( size_t c=0; c<m_Value.Children->size(); ++c )
@@ -429,10 +468,10 @@ JsonNode::~JsonNode()
 
 	if( m_Type == JsonNodeType_Array && m_Value.Items != NULL )
 	{
-		for( size_t c=0; c<m_Value.Children->size(); ++c )
-			delete (*m_Value.Children)[c];
+		for( size_t c=0; c<m_Value.Items->size(); ++c )
+			delete (*m_Value.Items)[c];
 
-		delete m_Value.Children;
+		delete m_Value.Items;
 	}
 }
 
@@ -459,24 +498,27 @@ bool JsonNode::IsValid() const
 bool JsonNode::GetBool() const
 {
 	ASSERT( m_Type == JsonNodeType_Bool, "Wrong node type. Not a bool" );
-	return m_Value.Bool;
+	// the ASSERT above is compiled out in release (NDEBUG) builds - keep this check live too,
+	// otherwise a mismatched type would reinterpret whatever union member the node actually holds
+	return (m_Type == JsonNodeType_Bool) ? m_Value.Bool : false;
 }
 
-float JsonNode::GetNumber() const
+JsonNumber JsonNode::GetNumber() const
 {
 	ASSERT( m_Type == JsonNodeType_Number, "Wrong node type. Not a number" );
-	return m_Value.Number;
+	return (m_Type == JsonNodeType_Number) ? m_Value.Number : 0.0;
 }
 
 const char * JsonNode::GetString() const
 {
 	ASSERT( m_Type == JsonNodeType_String, "Wrong node type. Not a string" );
-	return m_Value.String;
+	return (m_Type == JsonNodeType_String) ? m_Value.String : "! invalid Json node";
 }
 
 const size_t JsonNode::GetNbChildren() const
 {
-	ASSERT( m_Type == JsonNodeType_Object, "Wrong node type. Not an Object" );
+	// matches GetChild(index)/GetChildren() below, which both already allow Object or Array
+	ASSERT( m_Type == JsonNodeType_Object || m_Type == JsonNodeType_Array, "Wrong node type. Not Object nor Array" );
 	return m_Value.Children->size();
 }
 
@@ -596,7 +638,7 @@ JsonNode * JsonNode::AddBool( const char * _pName, bool _Value )
 	return pNode;
 }
 
-JsonNode * JsonNode::AddNumber( const char * _pName, float _Value )
+JsonNode * JsonNode::AddNumber( const char * _pName, JsonNumber _Value )
 {
 	ASSERT( (_pName && m_Type == JsonNodeType_Object) || (!_pName && m_Type == JsonNodeType_Array), "Wrong node type/name combination" );
 
@@ -664,19 +706,21 @@ void JsonNode::AttachNode( JsonNode * _pNode )
 
 bool JsonNode::Visit( JsonNodeVisitor & _Visitor )
 {
-	bool keepGoing;
+	// default to true so an Unknown-typed node (default case below) doesn't fall through
+	// to visitEarlyOut with an indeterminate value
+	bool keepGoing = true;
 	switch( m_Type )
 	{
-	case JsonNodeType_Null: 
-		keepGoing = _Visitor.OnNull( this ); 
+	case JsonNodeType_Null:
+		keepGoing = _Visitor.OnNull( this );
 		goto visitEarlyOut;
 
-	case JsonNodeType_Bool: 
-		keepGoing = _Visitor.OnBool( this ); 
+	case JsonNodeType_Bool:
+		keepGoing = _Visitor.OnBool( this );
 		goto visitEarlyOut;
 
-	case JsonNodeType_Number: 
-		keepGoing = _Visitor.OnNull( this ); 
+	case JsonNodeType_Number:
+		keepGoing = _Visitor.OnNumber( this );
 		goto visitEarlyOut;
 
 	case JsonNodeType_String: 
@@ -719,6 +763,41 @@ visitEarlyOut:
 //------------------------------------------------------------------------------
 //------------------------------------------------------------------------------
 //------------------------------------------------------------------------------
+
+// translates the recognised \" \\ \/ \b \f \n \r \t escapes from a raw (still-escaped) json
+// string body into _pOut, which must be at least (_pEnd - _pBegin) bytes. Returns the number
+// of bytes written. \u escapes are not decoded yet (see the \\todo in minja.h) and are copied
+// through as-is so they at least survive round-tripping.
+static size_t UnescapeString( const char * _pBegin, const char * _pEnd, char * _pOut )
+{
+	char * pOut = _pOut;
+
+	for( const char * pCurr = _pBegin; pCurr != _pEnd; ++pCurr )
+	{
+		if( *pCurr == '\\' )
+		{
+			++pCurr;
+			switch( *pCurr )
+			{
+			case '"':	*pOut++ = '"';	break;
+			case '\\':	*pOut++ = '\\';	break;
+			case '/':	*pOut++ = '/';	break;
+			case 'b':	*pOut++ = '\b';	break;
+			case 'f':	*pOut++ = '\f';	break;
+			case 'n':	*pOut++ = '\n';	break;
+			case 'r':	*pOut++ = '\r';	break;
+			case 't':	*pOut++ = '\t';	break;
+			default:	*pOut++ = '\\'; *pOut++ = *pCurr;	break;
+			}
+		}
+		else
+		{
+			*pOut++ = *pCurr;
+		}
+	}
+
+	return pOut - _pOut;
+}
 
 JsonDocument::JsonDocument()
 	: m_pCurrPair( NULL )
@@ -805,6 +884,9 @@ void JsonDocument::OnString( const char * _pParam1, const char * _pParam2 )
 	{
 		size_t len = _pParam2 - _pParam1 - 2;
 		ASSERT( len < MaxKeyName, "Name too long. Consider a shorter name of changing MaxKeyName" );
+		// the ASSERT above is compiled out in release (NDEBUG) builds - clamp for real too,
+		// otherwise a long enough key overflows m_pTempName
+		len = (len < MaxKeyName) ? len : MaxKeyName;
 
 		memcpy(m_pTempName, _pParam1+1, len );
 		m_pTempName[len] = 0;
@@ -813,8 +895,16 @@ void JsonDocument::OnString( const char * _pParam1, const char * _pParam2 )
 	}
 	else
 	{
-		size_t len = _pParam2 - _pParam1 - 2;
-		m_pCurrPair = m_pCurrObject->AddString( m_pName, _pParam1 + 1, _pParam2 - _pParam1 - 2 );
+		// un-escape into a scratch buffer sized to the raw (escaped) length - un-escaping
+		// only ever shrinks a string, never grows it, so this bound is always big enough
+		const char * pBegin = _pParam1 + 1;
+		const char * pEnd = _pParam2 - 1;
+		char * pUnescaped = new char [ pEnd - pBegin ];
+		size_t len = UnescapeString( pBegin, pEnd, pUnescaped );
+
+		m_pCurrPair = m_pCurrObject->AddString( m_pName, pUnescaped, len );
+
+		delete [] pUnescaped;
 	}
 }
 
@@ -822,10 +912,13 @@ void JsonDocument::OnNumber( const char * _pParam1, const char * _pParam2 )
 {
 	char text[64];
 	size_t size = _pParam2 - _pParam1;
+	ASSERT( size < sizeof(text), "Number token too long. Consider increasing the buffer size" );
+	// as above, clamp for real - a number token longer than the buffer used to overflow it
+	size = (size < sizeof(text)-1) ? size : sizeof(text)-1;
 	memcpy( text, _pParam1, size );
 	text[size] = 0;
 
-	m_pCurrPair = m_pCurrObject->AddNumber( m_pName, (float) atof(text) );
+	m_pCurrPair = m_pCurrObject->AddNumber( m_pName, (JsonNumber) atof(text) );
 }
 
 void JsonDocument::OnNull( const char * _pParam1, const char * _pParam2 )

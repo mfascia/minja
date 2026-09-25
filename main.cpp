@@ -1,7 +1,15 @@
-#include <conio.h>
 #include <assert.h>
 
 #include "minja.h"
+
+// getch() is an MSVC/conio.h-only "press a key to exit" helper - fall back to a plain
+// getchar() everywhere else so this still builds and behaves the same on gcc/clang
+#ifdef _WIN32
+	#include <conio.h>
+#else
+	#include <cstdio>
+	static int getch() { return getchar(); }
+#endif
 
 
 //------------------------------------------------------------------------------
@@ -34,19 +42,22 @@ class ContextDump : public JsonTokenizer::TokenProcessor
 	{
 		Log( "Test", "End Pair" );
 	}
-	virtual void OnString( const char * _pParam1, const char * _pParam2 ) 
+	virtual void OnString( const char * _pParam1, const char * _pParam2 )
 	{
 		char text[2048];
 		int size = _pParam2 - _pParam1 - 2;
+		// clamp before the memcpy - an input string longer than the buffer used to overflow it
+		size = (size < (int)sizeof(text)) ? size : (int)sizeof(text) - 1;
 		memcpy( text, _pParam1+1, size );
 		text[size] = 0;
 
 		Log( "Test", "string = %s", text );
 	}
-	virtual void OnNumber( const char * _pParam1, const char * _pParam2 ) 
+	virtual void OnNumber( const char * _pParam1, const char * _pParam2 )
 	{
 		char text[2048];
 		int size = _pParam2 - _pParam1;
+		size = (size < (int)sizeof(text)) ? size : (int)sizeof(text) - 1;
 		memcpy( text, _pParam1, size );
 		text[size] = 0;
 
@@ -64,9 +75,9 @@ class ContextDump : public JsonTokenizer::TokenProcessor
 	{
 		Log( "Test", "false" );
 	}
-	virtual void OnError( const char * _pParam1, const char * _pParam2 ) 
+	virtual void OnError( const char * _pParam1, const char * _pParam2, const char * _pParam3 )
 	{
-		Log( "Test", "Error: %s", _pParam2 );
+		Log( "Test", "Error: %s", _pParam3 );
 	}
 };
 
@@ -134,7 +145,7 @@ public:
 //------------------------------------------------------------------------------
 //------------------------------------------------------------------------------
 
-void main()
+int main()
 {
 	JsonTokenizer::ParseResult res;
 	const char * pE;
@@ -316,7 +327,10 @@ void main()
 
 	if( pDoc )
 	{
-		pDoc->Visit( JsonPrinter(true, 2) );
+		// Visit() takes JsonNodeVisitor by non-const reference (the printer tracks indent state
+		// as it walks) - MSVC alone tolerates binding that to a temporary, so name it instead
+		JsonPrinter printer( true, 2 );
+		pDoc->Visit( printer );
 
 		printf( "%s\n", (*pDoc)["glossary"]["GlossDiv"]["GlossList"]["GlossEntry"]["GlossDef"]["GlossSeeAlso"][1].GetString() );
 		printf( "%s\n", (*pDoc)["glossary"]["GlossDiv"]["GlossList"]["_DoesNotExist_"]["GlossDef"]["GlossSeeAlso"][1].GetString() );
@@ -329,7 +343,92 @@ void main()
 			printf( "%s\n", (*iter)->GetName() );
 		}
 	}
-	
+
+	//--------------------------------------------------------------------------------------------
+	// document-level coverage: the tests above only exercise the tokenizer layer via the raw
+	// Read* functions - the following go through JsonDocument/JsonNode instead, one case per
+	// primitive type, since that's the API real callers actually use
+	//--------------------------------------------------------------------------------------------
+
+	// nested object via JsonDocument::Parse (text4 was declared above but never actually used)
+	JsonDocument * pDoc4 = JsonDocument::Parse( text4 );
+	ASSERT_TRUE( pDoc4 != NULL );
+	ASSERT_EQ( JsonNodeType_Object, (*pDoc4)["user"].GetType() );
+	ASSERT_TRUE( !strcmp( "John", (*pDoc4)["user"]["name"].GetString() ) );
+	ASSERT_TRUE( !strcmp( "Doe", (*pDoc4)["user"]["surname"].GetString() ) );
+	ASSERT_EQ( JsonNodeType_Number, (*pDoc4)["age"].GetType() );
+	ASSERT_EQ( 33, (int) (*pDoc4)["age"].GetNumber() );
+	delete pDoc4;
+
+	// null, parsed rather than hand-built with AddNull - also exercises Visit() on a null-typed
+	// node, which used to read an uninitialized bool (see the fixed Visit() bug)
+	JsonDocument * pDocNull = JsonDocument::Parse( "{ 'value': null }" );
+	ASSERT_TRUE( pDocNull != NULL );
+	ASSERT_EQ( JsonNodeType_Null, (*pDocNull)["value"].GetType() );
+	delete pDocNull;
+
+	// true/false, parsed
+	JsonDocument * pDocBool = JsonDocument::Parse( "{ 'yes': true, 'no': false }" );
+	ASSERT_TRUE( pDocBool != NULL );
+	ASSERT_EQ( JsonNodeType_Bool, (*pDocBool)["yes"].GetType() );
+	ASSERT_TRUE( (*pDocBool)["yes"].GetBool() );
+	ASSERT_FALSE( (*pDocBool)["no"].GetBool() );
+	delete pDocBool;
+
+	// a number with more significant digits than a float can hold exactly - this used to lose
+	// precision when JsonNumber was hardcoded to float; with the default (double) it round-trips
+	JsonDocument * pDocNumber = JsonDocument::Parse( "{ 'big': 123456789012345 }" );
+	ASSERT_TRUE( pDocNumber != NULL );
+	ASSERT_EQ( JsonNodeType_Number, (*pDocNumber)["big"].GetType() );
+	ASSERT_EQ( 123456789012345.0, (*pDocNumber)["big"].GetNumber() );
+	delete pDocNumber;
+
+	// an escape sequence in a string value - GetString() must return it un-escaped
+	JsonDocument * pDocEscaped = JsonDocument::Parse( "{ \"msg\": \"a\\nb\" }" );
+	ASSERT_TRUE( pDocEscaped != NULL );
+	ASSERT_TRUE( !strcmp( "a\nb", (*pDocEscaped)["msg"].GetString() ) );
+	delete pDocEscaped;
+
+	// single-quoted strings all the way through JsonDocument, not just JsonTokenizer::ReadString
+	JsonDocument * pDocSingleQuoted = JsonDocument::Parse( "{ 'msg': 'hello' }" );
+	ASSERT_TRUE( pDocSingleQuoted != NULL );
+	ASSERT_TRUE( !strcmp( "hello", (*pDocSingleQuoted)["msg"].GetString() ) );
+	delete pDocSingleQuoted;
+
+	// the two regression tests below intentionally exceed OnNumber/OnString's internal buffers
+	// to prove the runtime clamp holds even when the matching ASSERT is compiled out - so they
+	// only make sense, and only run, in a release (NDEBUG) build; in debug the ASSERT already
+	// covers the same limit, loudly, which is exactly what it's there for
+#ifdef NDEBUG
+
+	// regression test for the (fixed) stack buffer overflow in JsonDocument::OnNumber: a number
+	// token deliberately longer than its internal 64-byte scratch buffer
+	{
+		char textLongNumber[300] = "{ 'n': 1";
+		for( int i=0; i<200; ++i )
+			strcat( textLongNumber, "9" );
+		strcat( textLongNumber, " }" );
+
+		JsonDocument * pDocLongNumber = JsonDocument::Parse( textLongNumber );
+		ASSERT_TRUE( pDocLongNumber != NULL );
+		ASSERT_EQ( JsonNodeType_Number, (*pDocLongNumber)["n"].GetType() );
+		delete pDocLongNumber;
+	}
+
+	// regression test for the (fixed) stack buffer overflow when a key exceeds MaxKeyName (255)
+	{
+		char textLongKey[600] = "{ '";
+		for( int i=0; i<300; ++i )
+			strcat( textLongKey, "k" );
+		strcat( textLongKey, "': 1 }" );
+
+		JsonDocument * pDocLongKey = JsonDocument::Parse( textLongKey );
+		ASSERT_TRUE( pDocLongKey != NULL );
+		delete pDocLongKey;
+	}
+
+#endif //NDEBUG
+
 	JsonDocument * pDoc2 = JsonDocument::Create();
 	
 	pDoc2->AddString( "first_name", "Marc" );
@@ -340,10 +439,30 @@ void main()
 								->AddString(NULL, "Kuzko")->GetParent()
 								->AddString(NULL, "Doki")->GetParent();
 
-	pDoc2->Visit( JsonPrinter(true, 2) );
+	// read the hand-built tree back through the JsonNode API (GetChild/operator[]/iterators),
+	// not just print it, to cover AddObject/AddArray round-tripping
+	ASSERT_EQ( (size_t)3, pDoc2->GetNbChildren() ); // first_name, surname, pets
+	ASSERT_TRUE( !strcmp( "Marc", (*pDoc2)["first_name"].GetString() ) );
+	ASSERT_TRUE( !strcmp( "Fascia", (*pDoc2)["surname"].GetString() ) );
+	ASSERT_EQ( JsonNodeType_Array, (*pDoc2)["pets"].GetType() );
+	ASSERT_EQ( (size_t)5, (*pDoc2)["pets"].GetNbChildren() );
+	ASSERT_TRUE( !strcmp( "Chiffon", (*pDoc2)["pets"][(size_t)0].GetString() ) );
+	ASSERT_TRUE( !strcmp( "Doki", (*pDoc2)["pets"][4].GetString() ) );
+
+	int nbPets = 0;
+	JsonNode::const_iterator petIter = (*pDoc2)["pets"].begin();
+	JsonNode::const_iterator petIend = (*pDoc2)["pets"].end();
+	for( ; petIter!=petIend; ++petIter )
+		++nbPets;
+	ASSERT_EQ( 5, nbPets );
+
+	JsonPrinter printer2( true, 2 );
+	pDoc2->Visit( printer2 );
 
 	printf( "\nAll tests passed successfully\n" );
 
 	getch();
+
+	return 0;
 }
 

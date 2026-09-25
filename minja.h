@@ -41,14 +41,32 @@
 #define ASSERT_FALSE( cond )	assert( !(cond) )
 #define ASSERT_EQ( a, b )		assert( (a) == (b) )
 #define ASSERT_NE( a, b )		assert( (a) != (b) )
-#define Log( cat, msg, ... )	printf( msg, __VA_ARGS__ )
+// ##__VA_ARGS__ swallows the trailing comma when no variadic args are passed (e.g. Log("cat", "msg"))
+// - standard variadic macros require at least one, which MSVC alone doesn't enforce; gcc/clang
+// have both adopted this token-paste trick as the portable workaround
+#define Log( cat, msg, ... )	printf( msg, ##__VA_ARGS__ )
 
 
 //------------------------------------------------------------------------------
 //------------------------------------------------------------------------------
 //------------------------------------------------------------------------------
 
-//--- Forward declarations 
+// minja targets memory constrained platforms (see the 0-allocation tokenizer layer), so the
+// storage type used for JSON numbers is a build choice rather than hardcoded: define
+// MINJA_USE_FLOAT before including this header to trade precision for 4 bytes per number
+// instead of 8. Defaults to double, which matches the JSON spec's numbers more faithfully.
+#ifdef MINJA_USE_FLOAT
+typedef float JsonNumber;
+#else
+typedef double JsonNumber;
+#endif
+
+
+//------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
+
+//--- Forward declarations
 class JsonNode;
 class JsonNodeVisitor;
 class JsonDocument;
@@ -63,6 +81,12 @@ namespace JsonTokenizer
 	class TokenProcessor
 	{
 	public:
+		// how many nested arrays/objects ReadArray/ReadObject will accept before bailing out with
+		// a ParseError instead of recursing forever and blowing the native stack
+		enum { MaxNestingDepth = 200 };
+
+		TokenProcessor() : m_NestingDepth(0) {}
+
 		virtual void OnBeginObject( const char * _pParam1 ) {}
 		virtual void OnEndObject( const char * _pParam1 ) {}
 		virtual void OnBeginArray( const char * _pParam1 ) {}
@@ -76,6 +100,8 @@ namespace JsonTokenizer
 		virtual void OnTrue( const char * _pParam1, const char * _pParam2 ) {}
 		virtual void OnFalse( const char * _pParam1, const char * _pParam2 ) {}
 		virtual void OnError( const char * _pParam1, const char * _pParam2, const char * _pParam3 ) {}
+
+		int m_NestingDepth;
 	};
 
 	enum ParseResult
@@ -136,7 +162,7 @@ protected:
 	{
 		char * String;
 		bool Bool;
-		float Number;
+		JsonNumber Number;
 		NodeVector * Children;
 		NodeVector * Items;
 	} m_Value;
@@ -151,7 +177,7 @@ public:
 	virtual bool IsValid() const;
 
 	virtual bool GetBool() const;
-	virtual float GetNumber() const;
+	virtual JsonNumber GetNumber() const;
 	virtual const char * GetString() const;
 
 	virtual const size_t GetNbChildren() const;
@@ -170,18 +196,24 @@ public:
 
 	JsonNode * AddNull( const char * _pName );
 	JsonNode * AddBool( const char * _pName, bool _Value );
-	JsonNode * AddNumber( const char * _pName, float _Value );
+	JsonNode * AddNumber( const char * _pName, JsonNumber _Value );
 	JsonNode * AddString( const char * _pName, const char * _pValue );
 	JsonNode * AddString( const char * _pName, const char * _pBegin, size_t _Len );
 	JsonNode * AddArray( const char * _pName );
 	JsonNode * AddObject( const char * _pName );
-	
+
 	void AttachNode( JsonNode * _pNode );
 
 	bool Visit( JsonNodeVisitor & _Visitor );
 
 protected:
 	JsonNode * CreateNode( const char * _pName, JsonNodeType _Type );
+
+private:
+	// JsonNode owns raw pointers (m_pName, string/children storage) - copying it would alias
+	// and eventually double-free that storage, so copy is disabled rather than implemented
+	JsonNode( const JsonNode & _Rhs );
+	JsonNode & operator = ( const JsonNode & _Rhs );
 };
 
 
@@ -240,6 +272,10 @@ public:
 
 private:
 	JsonDocument();
+
+	// see JsonNode - same reasoning, copy is disabled rather than implemented
+	JsonDocument( const JsonDocument & _Rhs );
+	JsonDocument & operator = ( const JsonDocument & _Rhs );
 };
 
 
